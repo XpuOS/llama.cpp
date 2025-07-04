@@ -34,6 +34,9 @@
 #include "vendors/cuda.h"
 #endif // defined(GGML_USE_HIP)
 
+#include "xsched/xsched.h"
+#include "xsched/cuda/hal.h"
+
 #define STRINGIZE_IMPL(...) #__VA_ARGS__
 #define STRINGIZE(...) STRINGIZE_IMPL(__VA_ARGS__)
 
@@ -800,6 +803,8 @@ struct ggml_backend_cuda_context {
 
     std::unique_ptr<ggml_cuda_graph> cuda_graph;
 
+    int priority = 0;
+
     explicit ggml_backend_cuda_context(int device) :
         device(device),
         name(GGML_CUDA_NAME + std::to_string(device)) {
@@ -811,6 +816,11 @@ struct ggml_backend_cuda_context {
         if (streams[device][stream] == nullptr) {
             ggml_cuda_set_device(device);
             CUDA_CHECK(cudaStreamCreateWithFlags(&streams[device][stream], cudaStreamNonBlocking));
+            HwQueueHandle hwqueue;
+            CudaQueueCreate(&hwqueue,streams[device][stream]);
+            XQueueHandle xqueue;
+            XQueueCreate(&xqueue, hwqueue, kPreemptLevelDeactivate, kQueueCreateFlagNone);
+            XHintPriority(xqueue, priority); // In XSched, lower number means lower priority
         }
         return streams[device][stream];
     }

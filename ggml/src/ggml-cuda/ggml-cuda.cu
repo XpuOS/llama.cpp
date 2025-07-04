@@ -64,6 +64,9 @@
 #include <string>
 #include <vector>
 
+#include "xsched/xsched.h"
+#include "xsched/cuda/hal.h"
+
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
 [[noreturn]]
@@ -2850,6 +2853,24 @@ static void ggml_backend_cuda_event_wait(ggml_backend_t backend, ggml_backend_ev
     }
 }
 
+static void ggml_backend_cuda_set_priority(ggml_backend_t backend, int prio) {
+    ggml_backend_cuda_context *cuda_ctx = (ggml_backend_cuda_context *)backend->context;
+    for (int device = 0; device < GGML_CUDA_MAX_DEVICES; device++) {
+        for (int idx = 0; idx < GGML_CUDA_MAX_STREAMS; idx++) {
+            auto stream = cuda_ctx->streams[device][idx];
+            if(stream == nullptr) {
+                continue;
+            }
+            HwQueueHandle hwqueue;
+            CudaQueueCreate(&hwqueue,stream);
+            XQueueHandle xqueue;
+            XQueueCreate(&xqueue, hwqueue, kPreemptLevelDeactivate, kQueueCreateFlagNone);
+            XHintPriority(xqueue, prio); // In XSched, lower number means lower priority
+        }
+    }
+    cuda_ctx->priority = prio;
+}
+
 static const ggml_backend_i ggml_backend_cuda_interface = {
     /* .get_name                = */ ggml_backend_cuda_get_name,
     /* .free                    = */ ggml_backend_cuda_free,
@@ -2864,6 +2885,7 @@ static const ggml_backend_i ggml_backend_cuda_interface = {
     /* .graph_compute           = */ ggml_backend_cuda_graph_compute,
     /* .event_record            = */ ggml_backend_cuda_event_record,
     /* .event_wait              = */ ggml_backend_cuda_event_wait,
+    /* .set_priority            = */ ggml_backend_cuda_set_priority,
 };
 
 static ggml_guid_t ggml_backend_cuda_guid() {

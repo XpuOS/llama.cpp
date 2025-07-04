@@ -9,7 +9,11 @@ CHAT=(
     "Sure. The largest city in Europe is Moscow, the capital of Russia."
 )
 
-INSTRUCTION="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions."
+PRIO=$1
+echo "priority: $PRIO"
+
+# INSTRUCTION="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions."
+INSTRUCTION="A chat between a human and an AI assistant. The assistant has no word limits."
 
 trim() {
     shopt -s extglob
@@ -41,19 +45,22 @@ N_KEEP=$(tokenize "${INSTRUCTION}" | wc -l)
 
 chat_completion() {
     PROMPT="$(trim_trailing "$(format_prompt "$1")")"
-    DATA="$(echo -n "$PROMPT" | jq -Rs --argjson n_keep $N_KEEP '{
+    DATA="$(echo -n "$PROMPT" | jq -Rs --argjson n_keep $N_KEEP --argjson prio $PRIO '{
         prompt: .,
         temperature: 0.2,
         top_k: 40,
         top_p: 0.9,
         n_keep: $n_keep,
-        n_predict: 256,
+        n_predict: 4096,
         cache_prompt: true,
         stop: ["\n### Human:"],
-        stream: true
+        stream: true,
+        priority: $prio,
     }')"
 
     ANSWER=''
+
+    echo $DATA
 
     while IFS= read -r LINE; do
         if [[ $LINE = data:* ]]; then

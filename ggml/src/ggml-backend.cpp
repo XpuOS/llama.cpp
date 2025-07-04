@@ -350,6 +350,12 @@ ggml_backend_dev_t ggml_backend_get_device(ggml_backend_t backend) {
     return backend->device;
 }
 
+void ggml_backend_set_priority(ggml_backend_t backend, int prio) {
+    if(backend->iface.set_priority != nullptr) {
+        backend->iface.set_priority(backend,prio);
+    }
+}
+
 // backend copy
 
 static bool ggml_are_same_layout(const struct ggml_tensor * a, const struct ggml_tensor * b) {

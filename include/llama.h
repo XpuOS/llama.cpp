@@ -1477,6 +1477,8 @@ extern "C" {
             ggml_opt_epoch_callback   callback_train,
             ggml_opt_epoch_callback   callback_eval);
 
+    LLAMA_API void llama_set_priority(struct llama_context *ctx, int prio);
+
 #ifdef __cplusplus
 }
 #endif

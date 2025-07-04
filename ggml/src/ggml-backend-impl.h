@@ -114,6 +114,9 @@ extern "C" {
         void (*event_record)(ggml_backend_t backend, ggml_backend_event_t event);
         // wait for an event on on a different stream
         void (*event_wait)  (ggml_backend_t backend, ggml_backend_event_t event);
+
+        // (optional) backend context priority
+        void (*set_priority)(ggml_backend_t backend, int prio);
     };
 
     struct ggml_backend {

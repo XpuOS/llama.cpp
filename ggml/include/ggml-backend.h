@@ -113,6 +113,8 @@ extern "C" {
 
     GGML_API ggml_backend_dev_t ggml_backend_get_device(ggml_backend_t backend);
 
+    GGML_API void ggml_backend_set_priority(ggml_backend_t backend, int prio);
+
     //
     // Events
     //

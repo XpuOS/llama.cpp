@@ -174,6 +174,10 @@ struct llama_context {
             int64_t                          ndata_in_loop,
             int64_t                          t_loop_start);
 
+    //
+    // priority
+    //
+    void set_priority(int prio);
 private:
     //
     // output

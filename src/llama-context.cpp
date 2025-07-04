@@ -2153,6 +2153,15 @@ void llama_context::opt_epoch(
 }
 
 //
+// priority
+//
+void llama_context::set_priority(int prio) {
+    for(auto backend: backend_ptrs) {
+        ggml_backend_set_priority(backend, prio);
+    }
+}
+
+//
 // interface implementation
 //
 
@@ -2842,4 +2851,8 @@ void llama_opt_epoch(
         idata_split,
         callback_train,
         callback_eval);
+}
+
+void llama_set_priority(struct llama_context *ctx, int prio) {
+    ctx->set_priority(prio);
 }
