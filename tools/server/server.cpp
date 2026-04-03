@@ -5010,9 +5010,9 @@ int main(int argc, char ** argv) {
     std::vector<std::thread> threads;
     // this call blocks the main thread until queue_tasks.terminate() is called
     for(int i = 0; i < SERVER_TASK_PRIO_COUNT; i++) {
-        threads.emplace_back([&ctx_server, &i]() {
-            ctx_server[i].queue_tasks.start_loop();
-        });
+        threads.emplace_back([&ctx_server](int ind) {
+            ctx_server[ind].queue_tasks.start_loop();
+        },i);
     }
 
     for(auto &thread: threads) {

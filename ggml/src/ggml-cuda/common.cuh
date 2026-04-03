@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <mutex>
 
 #if defined(GGML_USE_HIP)
 #include "vendors/hip.h"
@@ -36,6 +37,17 @@
 
 #include "xsched/xsched.h"
 #include "xsched/cuda/hal.h"
+
+// XSched automatic XQueue configuration
+// When XSCHED_AUTO_XQUEUE is enabled, XSched will automatically create XQueue for CUDA streams
+// Use XSCHED_AUTO_XQUEUE_LEVEL to set the preemption level (default: auto-detect based on GPU architecture)
+#ifndef XSCHED_AUTO_XQUEUE
+#define XSCHED_AUTO_XQUEUE 0  // Default: manual XQueue creation
+#endif
+
+#ifndef XSCHED_AUTO_XQUEUE_LEVEL
+#define XSCHED_AUTO_XQUEUE_LEVEL -1  // Default: auto-detect
+#endif
 
 #define STRINGIZE_IMPL(...) #__VA_ARGS__
 #define STRINGIZE(...) STRINGIZE_IMPL(__VA_ARGS__)
@@ -751,7 +763,7 @@ struct ggml_tensor_extra_gpu {
 
 
 #if (defined(GGML_CUDA_USE_GRAPHS) || defined(GGML_HIP_GRAPHS))
-#define USE_CUDA_GRAPH
+// #define USE_CUDA_GRAPH
 #endif
 
 struct ggml_graph_node_properties {
@@ -799,8 +811,11 @@ struct ggml_backend_cuda_context {
     cudaEvent_t copy_event = nullptr;
 
     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
+    HwQueueHandle hwqueues[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { 0 } };
+    XQueueHandle xqueues[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { 0 } };
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 
+    mutable std::mutex streams_mutex;
     std::unique_ptr<ggml_cuda_graph> cuda_graph;
 
     int priority = 0;
@@ -812,16 +827,104 @@ struct ggml_backend_cuda_context {
 
     ~ggml_backend_cuda_context();
 
+    // Disable copying and moving to prevent resource management issues
+    ggml_backend_cuda_context(const ggml_backend_cuda_context&) = delete;
+    ggml_backend_cuda_context& operator=(const ggml_backend_cuda_context&) = delete;
+    ggml_backend_cuda_context(ggml_backend_cuda_context&&) = delete;
+    ggml_backend_cuda_context& operator=(ggml_backend_cuda_context&&) = delete;
+
+    int get_max_supported_preempt_level(int device_id) {
+        // If XSCHED_AUTO_XQUEUE_LEVEL is explicitly set, use it
+        if (XSCHED_AUTO_XQUEUE_LEVEL >= 0) {
+            return XSCHED_AUTO_XQUEUE_LEVEL;
+        }
+        
+        // Auto-detect based on GPU architecture
+        cudaDeviceProp prop;
+        CUDA_CHECK(cudaGetDeviceProperties(&prop, device_id));
+        int arch = prop.major * 10 + prop.minor;
+        
+        // Corrected preemption level logic based on official requirements
+        if (arch >= 80) {  // Ampere (A100, RTX 30 series) and newer
+            return 3; // kPreemptLevelInterrupt
+        } else if (arch >= 70) {  // Volta (V100) and Turing
+            return 3; // kPreemptLevelInterrupt
+        } else if (arch >= 60) {  // Pascal (GTX 10 series)
+            return 2; // kPreemptLevelDeactivate
+        } else if (arch >= 50) {  // Maxwell (GTX 9 series)
+            return 2; // kPreemptLevelDeactivate
+        } else if (arch >= 30) {  // Kepler (K20, K40, GTX TITAN)
+            return 2; // kPreemptLevelDeactivate
+        } else {
+            // For older architectures or unknown
+            return 1; // kPreemptLevelBlock
+        }
+    }
+
     cudaStream_t stream(int device, int stream) {
+        std::lock_guard<std::mutex> lock(streams_mutex);
+        
+        // If stream does not exist, create stream
         if (streams[device][stream] == nullptr) {
             ggml_cuda_set_device(device);
             CUDA_CHECK(cudaStreamCreateWithFlags(&streams[device][stream], cudaStreamNonBlocking));
-            HwQueueHandle hwqueue;
-            CudaQueueCreate(&hwqueue,streams[device][stream]);
-            XQueueHandle xqueue;
-            XQueueCreate(&xqueue, hwqueue, kPreemptLevelDeactivate, kQueueCreateFlagNone);
-            XHintPriority(xqueue, priority); // In XSched, lower number means lower priority
+            
+#if XSCHED_AUTO_XQUEUE
+            // In auto-XQueue mode, XSched automatically creates XQueue for CUDA streams
+            // Note: XQueueGetFromCudaStream is planned future API, currently using two-step creation
+            HwQueueHandle hwqueue = 0;
+            XResult res = CudaQueueCreate(&hwqueue, streams[device][stream]);
+            if (res != kXSchedSuccess) {
+                CUDA_CHECK(cudaStreamDestroy(streams[device][stream]));
+                streams[device][stream] = nullptr;
+                GGML_ABORT("CudaQueueCreate failed: %d", res);
+            }
+            
+            XQueueHandle xqueue = 0;
+            res = XQueueCreate(&xqueue, hwqueue, get_max_supported_preempt_level(device), kQueueCreateFlagNone);
+            if (res != kXSchedSuccess) {
+                HwQueueDestroy(hwqueue);
+                CUDA_CHECK(cudaStreamDestroy(streams[device][stream]));
+                streams[device][stream] = nullptr;
+                GGML_ABORT("XQueueCreate failed: %d", res);
+            }
+            
+            hwqueues[device][stream] = hwqueue;
+            xqueues[device][stream] = xqueue;
+            
+            // Set initial priority (always set, including priority 0)
+            XHintPriority(xqueue, priority);
+#else
+            // Manual XQueue creation mode (legacy)
+            HwQueueHandle hwqueue = 0;
+            XResult res = CudaQueueCreate(&hwqueue, streams[device][stream]);
+            if (res != kXSchedSuccess) {
+                CUDA_CHECK(cudaStreamDestroy(streams[device][stream]));
+                streams[device][stream] = nullptr;
+                GGML_ABORT("CudaQueueCreate failed: %d", res);
+            }
+            
+            XQueueHandle xqueue = 0;
+            res = XQueueCreate(&xqueue, hwqueue, get_max_supported_preempt_level(device), kQueueCreateFlagNone);
+            if (res != kXSchedSuccess) {
+                HwQueueDestroy(hwqueue);
+                CUDA_CHECK(cudaStreamDestroy(streams[device][stream]));
+                streams[device][stream] = nullptr;
+                GGML_ABORT("XQueueCreate failed: %d", res);
+            }
+            
+            hwqueues[device][stream] = hwqueue;
+            xqueues[device][stream] = xqueue;
+            
+            // Set initial priority (always set, including priority 0)
+            XHintPriority(xqueue, priority);
+#endif
         }
+        // If stream exists but XQueue is not bound (should not happen, but ensure robustness)
+        else if (xqueues[device][stream] == 0 && !XSCHED_AUTO_XQUEUE) {
+            GGML_ABORT("Stream exists but XQueue not bound - internal error");
+        }
+        
         return streams[device][stream];
     }
 
