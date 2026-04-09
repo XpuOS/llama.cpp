@@ -531,14 +531,28 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     if (copy_event != nullptr) {
         CUDA_CHECK(cudaEventDestroy(copy_event));
     }
+    
+    // Destroy all XSched queues and hardware queues
     for (int i = 0; i < GGML_CUDA_MAX_DEVICES; ++i) {
         for (int j = 0; j < GGML_CUDA_MAX_STREAMS; ++j) {
+            if (xqueues[i][j] != 0) {
+                XQueueDestroy(xqueues[i][j]);
+                xqueues[i][j] = 0;
+            }
+
+            if (hwqueues[i][j] != 0) {
+                HwQueueDestroy(hwqueues[i][j]);
+                hwqueues[i][j] = 0;
+            }
+
             if (streams[i][j] != nullptr) {
                 CUDA_CHECK(cudaStreamDestroy(streams[i][j]));
+                streams[i][j] = nullptr;
             }
         }
         if (cublas_handles[i] != nullptr) {
             CUBLAS_CHECK(cublasDestroy(cublas_handles[i]));
+            cublas_handles[i] = nullptr;
         }
     }
 }
@@ -2855,19 +2869,19 @@ static void ggml_backend_cuda_event_wait(ggml_backend_t backend, ggml_backend_ev
 
 static void ggml_backend_cuda_set_priority(ggml_backend_t backend, int prio) {
     ggml_backend_cuda_context *cuda_ctx = (ggml_backend_cuda_context *)backend->context;
+    
+    std::lock_guard<std::mutex> lock(cuda_ctx->streams_mutex);
+    
+    // Update priority for all existing XQueues
     for (int device = 0; device < GGML_CUDA_MAX_DEVICES; device++) {
         for (int idx = 0; idx < GGML_CUDA_MAX_STREAMS; idx++) {
-            auto stream = cuda_ctx->streams[device][idx];
-            if(stream == nullptr) {
-                continue;
+            if (cuda_ctx->xqueues[device][idx] != 0) {
+                XHintPriority(cuda_ctx->xqueues[device][idx], prio);
             }
-            HwQueueHandle hwqueue;
-            CudaQueueCreate(&hwqueue,stream);
-            XQueueHandle xqueue;
-            XQueueCreate(&xqueue, hwqueue, kPreemptLevelDeactivate, kQueueCreateFlagNone);
-            XHintPriority(xqueue, prio); // In XSched, lower number means lower priority
         }
     }
+    
+    // Store new priority, subsequent XQueues will use this priority
     cuda_ctx->priority = prio;
 }
 
